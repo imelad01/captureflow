@@ -1,0 +1,92 @@
+import { headers } from "next/headers";
+import { notFound } from "next/navigation";
+import type { Metadata } from "next";
+import {
+  getRecording,
+  getTranscript,
+  listReactions,
+  recordView,
+  touchLastViewed,
+} from "@/lib/recording/db";
+import { viewerKeyFor } from "@/lib/recording/viewer-key";
+import { resolveTranscript } from "@/lib/recording/transcript";
+import { verifySession } from "@/lib/recording/verify-session";
+import { canViewResource } from "@/lib/visibility";
+import { viewerMediaUrl, withVersion } from "@/lib/recording/media-url";
+import { parseRecordingConfigJson } from "@/lib/recording-config";
+import { isValidSlug } from "@/lib/recording/slug";
+import { APP_WEB_SITE_URL, PRODUCT_NAME, viewUrlFor } from "@/lib/site";
+import { EmbedPlayer } from "./EmbedPlayer";
+
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: `${PRODUCT_NAME} recording`,
+  robots: { index: false, follow: false },
+};
+
+// The share page's player alone, for the extension to frame on GitHub.
+export default async function EmbedPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = await params;
+  if (!isValidSlug(id)) notFound();
+  const row = await getRecording(id);
+  if (!row || row.state !== "ready") notFound();
+
+  const requestHeaders = await headers();
+  const visitorResult = await verifySession(requestHeaders.get("cookie"));
+  const visitor = visitorResult === "unknown" ? null : visitorResult;
+  if (!canViewResource(visitor, row)) notFound();
+
+  const isOwner = !!(visitor && row.userId && visitor.userId === row.userId);
+  void (
+    isOwner
+      ? touchLastViewed(id)
+      : viewerKeyFor(visitor?.userId ?? null, requestHeaders).then((key) =>
+          recordView(id, key, visitor?.userId ?? null),
+        )
+  ).catch(() => undefined);
+
+  const [videoUrlRaw, posterUrlRaw, reactions, webcamUrlRaw, transcriptRow] =
+    await Promise.all([
+      viewerMediaUrl(row, row.storageKey),
+      row.posterKey
+        ? viewerMediaUrl(row, row.posterKey)
+        : Promise.resolve(undefined),
+      listReactions(id),
+      row.webcamStorageKey && row.webcamState === "ready"
+        ? viewerMediaUrl(row, row.webcamStorageKey)
+        : Promise.resolve(undefined),
+      getTranscript(id),
+    ]);
+  const { transcript } = resolveTranscript(transcriptRow);
+
+  return (
+    <EmbedPlayer
+      captionsUrl={transcript ? `/api/r/transcript/${id}/captions` : undefined}
+      captionsLang={transcript?.language ?? undefined}
+      slug={id}
+      videoUrl={withVersion(videoUrlRaw, row.sizeBytes)}
+      posterUrl={
+        posterUrlRaw ? withVersion(posterUrlRaw, row.sizeBytes) : undefined
+      }
+      posterBlur={row.posterBlur}
+      webcamUrl={
+        webcamUrlRaw && row.webcamSizeBytes > 0
+          ? withVersion(webcamUrlRaw, row.webcamSizeBytes)
+          : undefined
+      }
+      serverDurationMs={row.durationMs}
+      serverWidth={row.width}
+      serverHeight={row.height}
+      config={parseRecordingConfigJson(row.configJson)}
+      initialReactions={reactions}
+      signedIn={!!visitor}
+      shareUrl={viewUrlFor(id)}
+      loginUrl={`${APP_WEB_SITE_URL}/login?next=${encodeURIComponent(`/r/${id}`)}`}
+    />
+  );
+}

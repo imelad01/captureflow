@@ -1,0 +1,453 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { encode } from "jpeg-js";
+import { NextRequest } from "next/server";
+
+const getRecording = vi.fn();
+const updateRecording = vi.fn();
+const deleteRecording = vi.fn();
+const resolveToken = vi.fn();
+const session = vi.fn();
+const putObject = vi.fn();
+const deleteObject = vi.fn();
+const createTranscriptJob = vi.fn();
+const dispatchTranscription = vi.fn();
+const getReaction = vi.fn();
+const deleteReaction = vi.fn();
+
+vi.mock("next/headers", () => ({
+  headers: async () => new Headers({ cookie: "session=1" }),
+}));
+vi.mock("@/lib/recording/db", () => ({
+  getRecording: (...a: unknown[]) => getRecording(...a),
+  updateRecording: (...a: unknown[]) => updateRecording(...a),
+  deleteRecording: (...a: unknown[]) => deleteRecording(...a),
+  createTranscriptJob: (...a: unknown[]) => createTranscriptJob(...a),
+  getReaction: (...a: unknown[]) => getReaction(...a),
+  deleteReaction: (...a: unknown[]) => deleteReaction(...a),
+}));
+vi.mock("@/lib/recording/transcription-dispatch", () => ({
+  dispatchTranscription: (...a: unknown[]) => dispatchTranscription(...a),
+}));
+vi.mock("@/lib/recording/device-tokens", () => ({
+  resolveDeviceTokenToUser: (...a: unknown[]) => resolveToken(...a),
+}));
+vi.mock("@/lib/recording/verify-session", () => ({
+  verifySessionOrNull: (...a: unknown[]) => session(...a),
+}));
+vi.mock("@/lib/recording/r2", () => ({
+  abortMultipartUpload: vi.fn(),
+  deleteObject: (...a: unknown[]) => deleteObject(...a),
+  deleteObjectPrefix: vi.fn(),
+  putObject: (...a: unknown[]) => putObject(...a),
+  publicUrlFor: async (k: string) => `https://cdn/${k}`,
+}));
+
+const del = await import("./r/[id]/route");
+const visibility = await import("./r/visibility/route");
+const abort = await import("./r/abort/route");
+const poster = await import("./r/poster/route");
+const audioPart = await import("./r/audio-part/route");
+const transcribe = await import("./r/transcribe/route");
+const reaction = await import("./r/reactions/[id]/route");
+
+const SLUG = "abcdefgh23";
+const DEVICE = "device-1234";
+
+function row(state = "ready") {
+  return {
+    slug: SLUG,
+    state,
+    visibility: "private",
+    userId: "owner",
+    deviceId: DEVICE,
+    workspaceId: null,
+    storageKey: "videos/k.mp4",
+    posterKey: null,
+    webcamStorageKey: null,
+    uploadId: state === "pending" ? "up" : null,
+    webcamUploadId: null,
+  };
+}
+
+function req(
+  path: string,
+  init: { method: string; headers?: Record<string, string>; body?: BodyInit },
+): NextRequest {
+  return new NextRequest(`http://localhost${path}`, init);
+}
+
+const asDevice = { "x-captureflow-device": DEVICE };
+const asOwnerApp = { ...asDevice, authorization: "Bearer owner-token" };
+const asOtherApp = { ...asDevice, authorization: "Bearer other-token" };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  resolveToken.mockImplementation(async (t: string) =>
+    t === "owner-token" ? "owner" : t === "other-token" ? "other" : null,
+  );
+  session.mockResolvedValue(null);
+});
+
+const ownerOnly = [
+  [
+    "DELETE",
+    (headers: Record<string, string>) =>
+      del.DELETE(req(`/api/r/${SLUG}`, { method: "DELETE", headers }), {
+        params: Promise.resolve({ id: SLUG }),
+      }),
+    deleteRecording,
+  ],
+  [
+    "visibility",
+    (headers: Record<string, string>) =>
+      visibility.POST(
+        req(`/api/r/visibility?slug=${SLUG}`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ value: "public" }),
+        }),
+      ),
+    updateRecording,
+  ],
+] as const;
+
+describe.each(ownerOnly)("%s", (_name, call, effect) => {
+  beforeEach(() => getRecording.mockResolvedValue(row()));
+
+  it("refuses the device id on its own", async () => {
+    expect((await call(asDevice)).status).toBe(403);
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("refuses another account's token sent with the right device id", async () => {
+    expect((await call(asOtherApp)).status).toBe(403);
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("refuses a revoked token without falling back to the cookie", async () => {
+    session.mockResolvedValue({ userId: "owner" });
+    expect(
+      (await call({ ...asDevice, authorization: "Bearer revoked-token" }))
+        .status,
+    ).toBe(403);
+    expect(effect).not.toHaveBeenCalled();
+  });
+
+  it("accepts the owner's app token", async () => {
+    expect((await call(asOwnerApp)).status).toBe(200);
+    expect(effect).toHaveBeenCalled();
+  });
+
+  it("accepts the owner's browser session", async () => {
+    session.mockResolvedValue({ userId: "owner" });
+    expect((await call({})).status).toBe(200);
+    expect(effect).toHaveBeenCalled();
+  });
+
+  it("refuses someone else's browser session", async () => {
+    session.mockResolvedValue({ userId: "other" });
+    expect((await call({})).status).toBe(403);
+    expect(effect).not.toHaveBeenCalled();
+  });
+});
+
+describe("abort", () => {
+  const call = () =>
+    abort.POST(
+      req("/api/r/abort", {
+        method: "POST",
+        headers: asDevice,
+        body: JSON.stringify({ slug: SLUG }),
+      }),
+    );
+
+  it("removes an upload still in flight with just the device id", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    expect((await call()).status).toBe(200);
+    expect(deleteRecording).toHaveBeenCalledWith(SLUG);
+    expect(updateRecording).not.toHaveBeenCalled();
+  });
+
+  it("leaves a finished recording alone", async () => {
+    getRecording.mockResolvedValue(row("ready"));
+    expect((await call()).status).toBe(409);
+    expect(deleteRecording).not.toHaveBeenCalled();
+    expect(updateRecording).not.toHaveBeenCalled();
+  });
+});
+
+describe("poster", () => {
+  const call = (headers: Record<string, string>) =>
+    poster.POST(
+      req(`/api/r/poster?slug=${SLUG}`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "image/jpeg" },
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    );
+
+  it("takes the device id while the upload is in flight", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    expect((await call(asDevice)).status).toBe(200);
+    expect(putObject).toHaveBeenCalled();
+  });
+
+  it("needs the owner to replace the poster of a finished recording", async () => {
+    getRecording.mockResolvedValue(row("ready"));
+    expect((await call(asDevice)).status).toBe(403);
+    expect(putObject).not.toHaveBeenCalled();
+  });
+
+  it("lets the owner's app replace it", async () => {
+    getRecording.mockResolvedValue(row("ready"));
+    expect((await call(asOwnerApp)).status).toBe(200);
+  });
+
+  it("stores a card thumbnail beside a JPEG poster and drops the old one", async () => {
+    getRecording.mockResolvedValue({
+      ...row("pending"),
+      posterThumbKey: "posters/k.00000000deadbeef.thumb.jpg",
+    });
+    deleteObject.mockResolvedValue(undefined);
+    const jpeg = encode(
+      { width: 8, height: 8, data: new Uint8Array(8 * 8 * 4).fill(200) },
+      80,
+    ).data;
+    const res = await poster.POST(
+      req(`/api/r/poster?slug=${SLUG}`, {
+        method: "POST",
+        headers: { ...asDevice, "content-type": "image/jpeg" },
+        body: new Uint8Array(jpeg),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const keys = putObject.mock.calls.map((c) => c[0]);
+    expect(keys).toContain("posters/k.jpg");
+    const thumbKey = keys.find((k) =>
+      /^posters\/k\.[0-9a-f]{16}\.thumb2\.jpg$/.test(k),
+    );
+    expect(thumbKey).toBeDefined();
+    expect(putObject.mock.calls.find((c) => c[0] === thumbKey)?.[3]).toMatch(
+      /immutable/,
+    );
+    expect(deleteObject).toHaveBeenCalledWith(
+      "posters/k.00000000deadbeef.thumb.jpg",
+    );
+    expect(updateRecording).toHaveBeenCalledWith(
+      SLUG,
+      expect.objectContaining({ posterThumbKey: thumbKey }),
+    );
+  });
+
+  it("stores a client-drawn card under the poster's digest key", async () => {
+    getRecording.mockResolvedValue({
+      ...row("pending"),
+      posterKey: "posters/k.jpg",
+      posterThumbKey: "posters/k.00000000deadbeef.thumb.jpg",
+    });
+    deleteObject.mockResolvedValue(undefined);
+    const res = await poster.POST(
+      req(`/api/r/poster?slug=${SLUG}&kind=card`, {
+        method: "POST",
+        headers: { ...asDevice, "content-type": "image/jpeg" },
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(putObject).toHaveBeenCalledTimes(1);
+    const [key, , type, cache] = putObject.mock.calls[0];
+    expect(key).toMatch(/^posters\/k\.[0-9a-f]{16}\.thumb2\.jpg$/);
+    expect(type).toBe("image/jpeg");
+    expect(cache).toMatch(/immutable/);
+    expect(deleteObject).toHaveBeenCalledWith(
+      "posters/k.00000000deadbeef.thumb.jpg",
+    );
+    expect(updateRecording).toHaveBeenCalledWith(SLUG, {
+      posterThumbKey: key,
+    });
+  });
+
+  it("only takes a JPEG card", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    const res = await poster.POST(
+      req(`/api/r/poster?slug=${SLUG}&kind=card`, {
+        method: "POST",
+        headers: { ...asDevice, "content-type": "image/png" },
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(putObject).not.toHaveBeenCalled();
+  });
+});
+
+describe("audio-part", () => {
+  const call = (headers: Record<string, string>, part = 1) =>
+    audioPart.POST(
+      req(`/api/r/audio-part?slug=${SLUG}&part=${part}`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "audio/webm" },
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    );
+
+  it("takes the device id while the upload is in flight", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    expect((await call(asDevice)).status).toBe(200);
+    expect(putObject).toHaveBeenCalledWith(
+      "videos/k-audio-1.webm",
+      expect.anything(),
+      "audio/webm",
+      "no-store",
+    );
+  });
+
+  it("needs the owner once the recording is finished", async () => {
+    getRecording.mockResolvedValue(row("ready"));
+    expect((await call(asDevice)).status).toBe(403);
+    expect((await call(asOwnerApp)).status).toBe(200);
+  });
+
+  it("refuses another device and a bad part number", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    expect(
+      (await call({ "x-captureflow-device": "device-other" })).status,
+    ).toBe(403);
+    expect((await call(asDevice, 0)).status).toBe(400);
+    expect(putObject).not.toHaveBeenCalled();
+  });
+});
+
+describe("transcribe", () => {
+  const PARTS = [
+    { partNumber: 1, startMs: 0, endMs: 120_000 },
+    { partNumber: 2, startMs: 120_000, endMs: 150_000 },
+  ];
+  const call = (
+    headers: Record<string, string>,
+    body: unknown = { slug: SLUG, language: "en-US", parts: PARTS },
+  ) =>
+    transcribe.POST(
+      req("/api/r/transcribe", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      }),
+    );
+
+  it("starts the job and queues a message per part for the device", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    expect((await call(asDevice)).status).toBe(200);
+    expect(createTranscriptJob).toHaveBeenCalledWith({
+      slug: SLUG,
+      language: "en-US",
+      parts: [
+        { ...PARTS[0], storageKey: "videos/k-audio-1.webm" },
+        { ...PARTS[1], storageKey: "videos/k-audio-2.webm" },
+      ],
+    });
+    expect(dispatchTranscription).toHaveBeenCalledWith([
+      { slug: SLUG, partNumber: 1 },
+      { slug: SLUG, partNumber: 2 },
+    ]);
+  });
+
+  it("needs the owner once the recording is finished", async () => {
+    getRecording.mockResolvedValue(row("ready"));
+    expect((await call(asDevice)).status).toBe(403);
+    expect(createTranscriptJob).not.toHaveBeenCalled();
+    expect((await call(asOwnerApp)).status).toBe(200);
+  });
+
+  it("refuses another device and no device header", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    expect(
+      (await call({ "x-captureflow-device": "device-other" })).status,
+    ).toBe(403);
+    expect((await call({})).status).toBe(400);
+    expect(createTranscriptJob).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed layout before touching the db", async () => {
+    getRecording.mockResolvedValue(row("pending"));
+    const res = await call(asDevice, { slug: SLUG, parts: [] });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string };
+    expect(body.code).toBe("invalid_request");
+    expect(createTranscriptJob).not.toHaveBeenCalled();
+  });
+
+  it("leaves a failed recording alone", async () => {
+    getRecording.mockResolvedValue(row("failed"));
+    expect((await call(asDevice)).status).toBe(409);
+    expect(createTranscriptJob).not.toHaveBeenCalled();
+  });
+});
+
+describe("reaction delete", () => {
+  const call = () =>
+    reaction.DELETE(req("/api/r/reactions/7", { method: "DELETE" }), {
+      params: Promise.resolve({ id: "7" }),
+    });
+
+  beforeEach(() => {
+    getRecording.mockResolvedValue(row());
+    getReaction.mockResolvedValue({
+      id: 7,
+      slug: SLUG,
+      emoji: "🔥",
+      timestampMs: 1000,
+      createdAt: 1,
+      userId: "fan",
+      userName: "Fan",
+      userImage: null,
+    });
+    deleteReaction.mockResolvedValue(true);
+  });
+
+  it("needs a session", async () => {
+    expect((await call()).status).toBe(401);
+    expect(deleteReaction).not.toHaveBeenCalled();
+  });
+
+  it("lets the author remove it", async () => {
+    session.mockResolvedValue({ userId: "fan" });
+    expect((await call()).status).toBe(200);
+    expect(deleteReaction).toHaveBeenCalledWith(7);
+  });
+
+  it("lets the recording's owner remove it", async () => {
+    session.mockResolvedValue({ userId: "owner" });
+    expect((await call()).status).toBe(200);
+    expect(deleteReaction).toHaveBeenCalledWith(7);
+  });
+
+  it("refuses anyone else", async () => {
+    session.mockResolvedValue({ userId: "other" });
+    expect((await call()).status).toBe(403);
+    expect(deleteReaction).not.toHaveBeenCalled();
+  });
+
+  it("never matches an anonymous reaction to a session by null id", async () => {
+    getReaction.mockResolvedValue({
+      id: 7,
+      slug: SLUG,
+      emoji: "🔥",
+      timestampMs: 1000,
+      createdAt: 1,
+      userId: null,
+      userName: null,
+      userImage: null,
+    });
+    session.mockResolvedValue({ userId: "other" });
+    expect((await call()).status).toBe(403);
+    session.mockResolvedValue({ userId: "owner" });
+    expect((await call()).status).toBe(200);
+  });
+
+  it("404s a missing reaction", async () => {
+    getReaction.mockResolvedValue(null);
+    session.mockResolvedValue({ userId: "owner" });
+    expect((await call()).status).toBe(404);
+  });
+});

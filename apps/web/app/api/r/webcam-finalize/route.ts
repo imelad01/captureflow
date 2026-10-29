@@ -1,0 +1,113 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getRecording, updateRecording } from "@/lib/recording/db";
+import { isValidSlug } from "@/lib/recording/slug";
+import {
+  completeMultipartUpload,
+  deleteObject,
+  objectSize,
+} from "@/lib/recording/r2";
+import { optionsResponse, withCors, jsonError } from "@/lib/recording/cors";
+import { uploadOverrun } from "@/lib/recording/quota";
+import { overrunError } from "@/lib/recording/upload-errors";
+import type { FinalizeRequest } from "@/lib/recording/types";
+
+const DEVICE_HEADER = "x-captureflow-device";
+
+export function OPTIONS() {
+  return optionsResponse();
+}
+
+export async function POST(req: NextRequest) {
+  const deviceId = req.headers.get(DEVICE_HEADER);
+  if (!deviceId)
+    return jsonError("Missing device header", 400, "invalid_device");
+
+  let body: Partial<FinalizeRequest>;
+  try {
+    body = (await req.json()) as Partial<FinalizeRequest>;
+  } catch {
+    return jsonError("Invalid JSON", 400, "invalid_json");
+  }
+
+  if (!isValidSlug(body.slug)) {
+    return jsonError("Invalid slug", 400, "invalid_slug");
+  }
+  if (!Array.isArray(body.parts) || body.parts.length === 0) {
+    return jsonError("Missing parts", 400, "invalid_parts");
+  }
+  for (const p of body.parts) {
+    if (
+      !p ||
+      typeof p.partNumber !== "number" ||
+      typeof p.etag !== "string" ||
+      p.etag.length === 0
+    ) {
+      return jsonError("Malformed part entry", 400, "invalid_parts");
+    }
+  }
+  const sizeBytes = body.sizeBytes;
+  if (
+    typeof sizeBytes !== "number" ||
+    !Number.isFinite(sizeBytes) ||
+    sizeBytes <= 0
+  ) {
+    return jsonError("Invalid size", 400, "invalid_size");
+  }
+
+  const row = await getRecording(body.slug);
+  if (!row) return jsonError("Recording not found", 404, "not_found");
+  if (row.deviceId !== deviceId)
+    return jsonError("Forbidden", 403, "forbidden");
+  // Idempotent: desktop retries finalize, so return ok (not 409) if already ready.
+  if (row.webcamState === "ready") {
+    return withCors(NextResponse.json({ ok: true }));
+  }
+  if (
+    row.webcamState !== "pending" ||
+    !row.webcamUploadId ||
+    !row.webcamStorageKey
+  ) {
+    return jsonError("Webcam not finalizable", 409, "wrong_state");
+  }
+
+  // The companion stream draws on the same budget as the screen track.
+  const overrun = await uploadOverrun(deviceId, row, sizeBytes);
+  if (overrun) return overrunError(overrun);
+
+  await completeMultipartUpload(
+    row.webcamStorageKey,
+    row.webcamUploadId,
+    body.parts,
+  );
+
+  const actualWebcamBytes = await objectSize(row.webcamStorageKey);
+  if (actualWebcamBytes === null) {
+    await updateRecording(row.slug, {
+      webcamState: "failed",
+      webcamUploadId: null,
+    });
+    return jsonError("Object missing after complete", 502, "object_missing");
+  }
+
+  // Same post-complete re-check as /api/r/finalize, against R2's actual size.
+  const actualOverrun =
+    actualWebcamBytes > sizeBytes
+      ? await uploadOverrun(deviceId, row, actualWebcamBytes)
+      : null;
+  if (actualOverrun) {
+    await deleteObject(row.webcamStorageKey);
+    await updateRecording(row.slug, {
+      webcamState: "failed",
+      webcamUploadId: null,
+    });
+    return overrunError(actualOverrun);
+  }
+
+  await updateRecording(row.slug, {
+    webcamState: "ready",
+    webcamUploadId: null,
+    webcamSizeBytes: actualWebcamBytes,
+  });
+
+  return withCors(NextResponse.json({ ok: true }));
+}

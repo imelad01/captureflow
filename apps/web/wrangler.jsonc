@@ -1,0 +1,104 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "captureflow-web",
+  // Custom worker wrapper: re-exports OpenNext's fetch handler + adds the
+  // scheduled() cron handlers (multipart GC + retention sweep) and the
+  // queue() transcription consumer. It imports ./.open-next/worker.js,
+  // produced by `opennextjs-cloudflare build`.
+  "main": "worker.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // The OpenNext output ships unminified; every cold start loads the whole
+  // script, so a third less to fetch and parse is a third off that stall.
+  "minify": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS",
+  },
+  "observability": {
+    "enabled": true,
+  },
+  // Apex captureflow.dev routes to this worker as a Cloudflare Workers Custom
+  // Domain. Bind it once in the dashboard (Workers & Pages → captureflow-web →
+  // Settings → Domains & Routes → Add → Custom domain → captureflow.dev), which
+  // overrides the parked DNS record. This entry keeps it declarative so future
+  // deploys preserve the binding; custom_domain:true lets Cloudflare manage the
+  // apex DNS record for the worker.
+  "routes": [{ "pattern": "captureflow.dev", "custom_domain": true }],
+  // Cron Triggers → worker.ts scheduled(): hourly multipart GC + daily
+  // retention sweep against D1 + R2.
+  "triggers": {
+    "crons": ["0 * * * *", "0 4 * * *"],
+  },
+  // Create with `wrangler d1 create captureflow`, then paste the id.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "captureflow",
+      "database_id": "87523f52-ad6f-474f-85e8-87f267a98763",
+    },
+  ],
+  // All ported recording/screenshot r2.ts read env.BUCKET. Prefixes: videos/, posters/, screenshots/.
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "captureflow-recordings",
+    },
+  ],
+  // Cloudflare Email Service for invites and access requests; lib/email.ts
+  // falls back to Resend when it fails or is missing.
+  "send_email": [
+    { "name": "EMAIL", "allowed_sender_addresses": ["hello@captureflow.dev"] },
+  ],
+  // Transcripts: Whisper on Workers AI, one call per uploaded audio chunk.
+  "ai": { "binding": "AI" },
+  // /api/r/transcribe enqueues a message per chunk; worker.ts queue() runs
+  // them. Create once with `wrangler queues create captureflow-transcription`.
+  // max_retries must match TRANSCRIPTION_MAX_RETRIES in worker.ts.
+  "queues": {
+    "producers": [
+      {
+        "binding": "TRANSCRIPTION_QUEUE",
+        "queue": "captureflow-transcription",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "captureflow-transcription",
+        "max_batch_size": 1,
+        "max_concurrency": 5,
+        "max_retries": 3,
+        "retry_delay": 30,
+      },
+    ],
+  },
+  "vars": {
+    "NEXT_PUBLIC_APP_WEB_SITE_URL": "https://captureflow.dev",
+    "NEXT_PUBLIC_RECORDING_SITE_URL": "https://captureflow.dev",
+    "NEXT_PUBLIC_SCREENSHOT_SITE_URL": "https://captureflow.dev",
+    "NEXT_PUBLIC_MARKETING_SITE_URL": "https://captureflow.dev",
+    "R2_PUBLIC_BASE_URL": "https://cdn.captureflow.dev",
+    "BETTER_AUTH_URL": "https://captureflow.dev",
+    // Floor for the nav's star badge, used only when the GitHub call fails
+    // (its rate limit is per-IP and Workers share egress IPs). Without it the
+    // badge disappears instead of holding its last known figure.
+    "NEXT_PUBLIC_GITHUB_STARS": "3",
+    // Desktop registers the captureflow:// scheme; keep it until the desktop
+    // deep-link parser is rebranded in lockstep.
+    "APP_DEEP_LINK_SCHEME": "captureflow",
+    // The only extension /auth/callback will hand a device token to. Production
+    // fails closed, so leaving this unset rejects every id — including the real
+    // one. Public value (a hash of the store item's key), hence a var not a secret.
+    "CAPTUREFLOW_EXTENSION_ID": "lgpgeoelaokbigdljofhkgbfnfcnmcol",
+    // One Lemon Squeezy buy link per plan and cycle, and the variant each one
+    // sells so the webhook can name the plan on renewals. Public values.
+    "NEXT_PUBLIC_LEMON_LIGHT_MONTHLY_CHECKOUT_URL": "https://pay.captureflow.dev/checkout/buy/93848ab4-4fb5-4df4-ac5b-5bbc198364bb",
+    "NEXT_PUBLIC_LEMON_LIGHT_ANNUAL_CHECKOUT_URL": "https://pay.captureflow.dev/checkout/buy/601f31c9-76c7-46f2-8d9c-48b762e88d93",
+    "NEXT_PUBLIC_LEMON_PRO_MONTHLY_CHECKOUT_URL": "https://pay.captureflow.dev/checkout/buy/775fbd57-6dea-4dee-9b27-4cc8aa664916",
+    "NEXT_PUBLIC_LEMON_PRO_ANNUAL_CHECKOUT_URL": "https://pay.captureflow.dev/checkout/buy/a0548a7e-6407-4831-b9b0-27e3eef0da56",
+    "LEMON_LIGHT_MONTHLY_VARIANT_ID": "1849420",
+    "LEMON_LIGHT_ANNUAL_VARIANT_ID": "1849425",
+    "LEMON_PRO_MONTHLY_VARIANT_ID": "1828191",
+    "LEMON_PRO_ANNUAL_VARIANT_ID": "2302693",
+  },
+}

@@ -1,0 +1,186 @@
+"use client";
+
+import type { ReactNode } from "react";
+import {
+  HardDrive,
+  LogOut,
+  MessageSquare,
+  Receipt,
+  Settings,
+} from "lucide-react";
+import { Avatar, Chip, Dropdown, Separator, Typography } from "@heroui/react";
+import { getSeatPlan, type SeatPlanId } from "@captureflow/quota";
+import type { ThemePreference } from "@captureflow/ui";
+import { openSupportChat } from "@/components/marketing/support-chat";
+import { initials } from "@/lib/format";
+import { SUPPORT_EMAIL } from "@/lib/site";
+import { ThemeSegments } from "./ThemeSegments";
+
+export type AccountMenuPlan = "free" | SeatPlanId;
+
+export type AccountMenuNavItem = {
+  key: string;
+  icon: ReactNode;
+  label: string;
+  href: string;
+  onOpen?: () => void;
+  // Right-aligned accessory — a plan chip, a count. Purely decorative.
+  trailing?: ReactNode;
+};
+
+/*
+ * The one account nav list. Both surfaces build from it so they can't drift:
+ * the viewer renders on a possibly different origin, so it passes an absolute
+ * base, and it has no subscription to hand over — the plan chip is dropped
+ * there rather than guessed at. A self-hosted instance has no billing, and its
+ * support is the company's own, not ours.
+ */
+export function accountNavItems({
+  base = "",
+  plan,
+  selfHosted = false,
+  billing = true,
+}: {
+  base?: string;
+  plan?: AccountMenuPlan;
+  selfHosted?: boolean;
+  billing?: boolean;
+}): AccountMenuNavItem[] {
+  const items: AccountMenuNavItem[] = [
+    {
+      key: "billing",
+      icon: <Receipt size={16} />,
+      label: "Billing",
+      href: `${base}/billing`,
+      trailing:
+        plan === undefined ? undefined : (
+          <Chip size="sm" color={plan === "free" ? "default" : "accent"}>
+            {plan === "free" ? "Free" : getSeatPlan(plan).name}
+          </Chip>
+        ),
+    },
+    {
+      key: "devices",
+      icon: <HardDrive size={16} />,
+      label: "Connected devices",
+      href: `${base}/devices`,
+    },
+    {
+      key: "settings",
+      icon: <Settings size={16} />,
+      label: "Settings",
+      href: `${base}/settings`,
+    },
+    {
+      key: "support",
+      icon: <MessageSquare size={16} />,
+      label: "Contact support",
+      href: `mailto:${SUPPORT_EMAIL}`,
+      onOpen: openSupportChat,
+    },
+  ];
+  return items.filter(
+    (i) =>
+      !(selfHosted && (i.key === "billing" || i.key === "support")) &&
+      !(!billing && i.key === "billing"),
+  );
+}
+
+type Props = {
+  name: string | null;
+  email: string;
+  imageUrl: string | null;
+  plan?: AccountMenuPlan;
+  // Built by accountNavItems above; taken as a prop so a surface can pass its
+  // own base URL and plan chip.
+  navItems: AccountMenuNavItem[];
+  // Renders the theme row when the surface can supply the stored preference.
+  themePreference?: ThemePreference;
+  signingOut: boolean;
+  onSignOut: () => void;
+};
+
+export function AccountMenu({
+  name,
+  email,
+  imageUrl,
+  navItems,
+  themePreference,
+  signingOut,
+  onSignOut,
+}: Props) {
+  const displayName = name?.trim() || email;
+
+  return (
+    <Dropdown>
+      <Dropdown.Trigger
+        aria-label="Account menu"
+        className="cursor-pointer rounded-full outline-none"
+      >
+        {/* 36px, the height of the buttons either side of it. */}
+        <Avatar className="h-9 w-9">
+          {imageUrl && <Avatar.Image src={imageUrl} alt={displayName} />}
+          <Avatar.Fallback>{initials(displayName)}</Avatar.Fallback>
+        </Avatar>
+      </Dropdown.Trigger>
+
+      <Dropdown.Popover placement="bottom end" className="w-64">
+        {/* Identity reads as one block: avatar beside the name and address,
+            rather than the name alone over the address. */}
+        <div className="flex items-center gap-2.5 px-3 py-2.5">
+          <Avatar className="h-9 w-9 shrink-0">
+            {imageUrl && <Avatar.Image src={imageUrl} alt={displayName} />}
+            <Avatar.Fallback>{initials(displayName)}</Avatar.Fallback>
+          </Avatar>
+          <div className="min-w-0">
+            <Typography weight="semibold" className="truncate">
+              {displayName}
+            </Typography>
+            <Typography type="body-xs" color="muted" className="truncate">
+              {email}
+            </Typography>
+          </div>
+        </div>
+
+        <Separator />
+
+        <Dropdown.Menu>
+          {navItems.map((item) => (
+            <Dropdown.Item
+              key={item.key}
+              {...(item.onOpen
+                ? { onAction: item.onOpen }
+                : { href: item.href })}
+            >
+              {item.icon}
+              {item.label}
+              {item.trailing ? (
+                <span className="ms-auto ps-2">{item.trailing}</span>
+              ) : null}
+            </Dropdown.Item>
+          ))}
+        </Dropdown.Menu>
+
+        {themePreference ? (
+          <>
+            <Separator />
+            <ThemeSegments initialPreference={themePreference} />
+          </>
+        ) : null}
+
+        <Separator />
+
+        <Dropdown.Menu>
+          <Dropdown.Item
+            isDisabled={signingOut}
+            onAction={onSignOut}
+            className="text-danger"
+          >
+            <LogOut size={16} />
+            {signingOut ? "Signing out…" : "Sign out"}
+          </Dropdown.Item>
+        </Dropdown.Menu>
+      </Dropdown.Popover>
+    </Dropdown>
+  );
+}

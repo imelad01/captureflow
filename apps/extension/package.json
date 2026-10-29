@@ -1,0 +1,39 @@
+{
+  "name": "@captureflow/extension",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "description": "CaptureFlow browser screen recorder (WXT, MV3).",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "WXT_NO_KEY=1 wxt zip",
+    "typecheck": "wxt prepare && tsc --noEmit",
+    "lint": "echo \"(extension) lint: TODO\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "@captureflow/engine": "workspace:*",
+    "@heroui/react": "^3.2.6",
+    "@heroui/styles": "^3.2.6",
+    "@mediapipe/tasks-vision": "1.1.1",
+    "@webext-core/messaging": "^3.0.2",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "@types/chrome": "^0.2.0",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@wxt-dev/module-react": "^1.2.2",
+    "tailwindcss": "^4",
+    "typescript": "catalog:",
+    "vite": "^7.3.5",
+    "vitest": "^3.2.4",
+    "wxt": "0.20.27"
+  }
+}

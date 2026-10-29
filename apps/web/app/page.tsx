@@ -1,0 +1,91 @@
+import type { Metadata } from "next";
+import { redirect } from "next/navigation";
+import { isSelfHosted } from "@captureflow/quota";
+import { getAppWebEnv } from "@/lib/cf-env";
+import { loadSession } from "@/lib/session-guard";
+import { getRepoActivity, getStarCount, formatStars } from "@/lib/github";
+import { Nav } from "@/components/marketing/nav";
+import { HeroSection } from "@/components/marketing/hero-section";
+import { HighlightsSection } from "@/components/marketing/highlights-section";
+import { UseCasesSection } from "@/components/marketing/use-cases-section";
+import { ModesIntro } from "@/components/marketing/modes-intro";
+import { CollaborationSection } from "@/components/marketing/collaboration-section";
+import { PricingSection } from "@/components/marketing/pricing-section";
+import { FaqSection } from "@/components/marketing/faq-section";
+import { RepoActivitySection } from "@/components/marketing/repo-activity-section";
+import { CtaSection } from "@/components/marketing/cta-section";
+import { Footer } from "@/components/marketing/footer";
+import { I18nProvider } from "@/components/marketing/i18n-provider";
+import { MarketingShell } from "@/components/marketing/marketing-shell";
+import { JsonLd } from "@/components/marketing/json-ld";
+import {
+  APP_SCHEMA,
+  FAQ_SCHEMA,
+  ORGANIZATION_SCHEMA,
+  WEBSITE_SCHEMA,
+  SITE_TITLE,
+  SITE_DESCRIPTION,
+} from "@/lib/marketing/constants";
+
+export const dynamic = "force-dynamic";
+
+export const metadata: Metadata = {
+  title: { absolute: SITE_TITLE },
+  description: SITE_DESCRIPTION,
+  robots: { index: true, follow: true },
+  alternates: { canonical: "/" },
+  openGraph: {
+    type: "website",
+    url: "/",
+    siteName: "CaptureFlow",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    images: [
+      { url: "/og-image.png?v=3", width: 1200, height: 630, alt: SITE_TITLE },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    images: ["/og-image.png?v=3"],
+  },
+};
+
+export default async function RootPage() {
+  const session = await loadSession();
+  if (session) redirect("/recordings");
+  // A self-hosted instance is a company's internal tool, not our storefront.
+  if (isSelfHosted(await getAppWebEnv())) redirect("/login");
+
+  const [starCount, activity] = await Promise.all([
+    getStarCount(),
+    getRepoActivity(),
+  ]);
+  const stars = starCount != null ? formatStars(starCount) : null;
+
+  return (
+    <I18nProvider>
+      <MarketingShell>
+        <JsonLd
+          data={[WEBSITE_SCHEMA, ORGANIZATION_SCHEMA, APP_SCHEMA, FAQ_SCHEMA]}
+        />
+        <Nav stars={stars} />
+        {/* No page-rise here: the hero's sky runs up behind the nav, and
+            blurring it in on load reads as a burst rather than an arrival. */}
+        <main>
+          <HeroSection />
+          <ModesIntro />
+          <CollaborationSection />
+          <HighlightsSection />
+          <UseCasesSection />
+          <PricingSection />
+          <FaqSection />
+          <RepoActivitySection activity={activity} />
+          <CtaSection />
+        </main>
+        <Footer />
+      </MarketingShell>
+    </I18nProvider>
+  );
+}

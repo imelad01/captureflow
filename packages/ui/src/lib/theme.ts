@@ -1,0 +1,87 @@
+export type Theme = "light" | "dark";
+
+// What the user picked. "system" defers to the OS, so it is never what paints —
+// only ever what resolves to a Theme.
+export type ThemePreference = Theme | "system";
+
+export const THEME_COOKIE = "captureflow_theme";
+export const DEFAULT_THEME: Theme = "light";
+
+export function isTheme(value: unknown): value is Theme {
+  return value === "light" || value === "dark";
+}
+
+export function isThemePreference(value: unknown): value is ThemePreference {
+  return isTheme(value) || value === "system";
+}
+
+function readCookie(cookieHeader: string | null | undefined): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const [name, ...rest] = part.trim().split("=");
+    if (name === THEME_COOKIE) return decodeURIComponent(rest.join("="));
+  }
+  return null;
+}
+
+export function readThemePreferenceFromCookieHeader(
+  cookieHeader: string | null | undefined,
+): ThemePreference {
+  const value = readCookie(cookieHeader);
+  return isThemePreference(value) ? value : DEFAULT_THEME;
+}
+
+/*
+ * What to paint on the server. A "system" preference has no server-side answer
+ * — the OS setting never reaches us — so it renders as the default, and
+ * THEME_INIT_SCRIPT corrects it before first paint.
+ */
+export function readThemeFromCookieHeader(
+  cookieHeader: string | null | undefined,
+): Theme {
+  const value = readCookie(cookieHeader);
+  return isTheme(value) ? value : DEFAULT_THEME;
+}
+
+// Browsers drop a Domain set on a host without a public suffix (localhost), so
+// only share the preference across captureflow.dev hosts.
+export function writeThemePreferenceCookie(value: ThemePreference): void {
+  const host = window.location.hostname;
+  const parts = [
+    `${THEME_COOKIE}=${value}`,
+    "Path=/",
+    `Max-Age=${60 * 60 * 24 * 365}`,
+    "SameSite=Lax",
+  ];
+  if (host === "captureflow.dev" || host.endsWith(".captureflow.dev")) {
+    parts.push("Domain=.captureflow.dev");
+  }
+  if (window.location.protocol === "https:") parts.push("Secure");
+  document.cookie = parts.join("; ");
+}
+
+/*
+ * Runs blocking ahead of any paint, so a "system" preference never shows the
+ * server's guess first. The listener stays for the session and re-reads the
+ * cookie each time, so it covers both an OS switch made later and a preference
+ * switched to "system" without a reload.
+ */
+const THEME_INIT_SCRIPT = `(function(){try{
+var q=window.matchMedia("(prefers-color-scheme: dark)");
+var apply=function(){
+var m=document.cookie.match(/(?:^|; )${THEME_COOKIE}=([^;]*)/);
+if(!m||decodeURIComponent(m[1])!=="system")return;
+document.documentElement.setAttribute("data-theme",q.matches?"dark":"light");
+};
+apply();
+q.addEventListener("change",apply);
+}catch(e){}})()`;
+
+/*
+ * Markup rather than a <script> element on purpose: React never executes a
+ * script it creates on the client and logs an error when a render asks it to,
+ * which every client re-render of the layout holding it does. Written as the
+ * innerHTML of a plain element, the HTML parser is what inserts it on first
+ * load — so it runs — and React only ever rewrites an inert string after that.
+ */
+export const THEME_INIT_HTML = `<script>${THEME_INIT_SCRIPT}</script>`;

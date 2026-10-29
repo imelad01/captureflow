@@ -1,0 +1,53 @@
+export type RecordingChapter = {
+  id: string;
+  // Offset into the video, in milliseconds.
+  ms: number;
+  title: string;
+};
+
+export type RecordingSummaryChapters = {
+  summary: string;
+  chapters: RecordingChapter[];
+};
+
+export const EMPTY_SUMMARY_CHAPTERS: RecordingSummaryChapters = {
+  summary: "",
+  chapters: [],
+};
+
+// Caps bound the sidecar size so a malicious owner can't grow it unboundedly.
+const MAX_SUMMARY_LENGTH = 4_000;
+const MAX_CHAPTERS = 100;
+
+export function hydrateSummaryChapters(raw: unknown): RecordingSummaryChapters {
+  if (!raw || typeof raw !== "object") return EMPTY_SUMMARY_CHAPTERS;
+  const r = raw as Record<string, unknown>;
+  const summary =
+    typeof r.summary === "string" ? r.summary.slice(0, MAX_SUMMARY_LENGTH) : "";
+  const chapters = Array.isArray(r.chapters)
+    ? r.chapters
+        .filter(
+          (c): c is RecordingChapter =>
+            !!c &&
+            typeof c === "object" &&
+            typeof (c as RecordingChapter).id === "string" &&
+            typeof (c as RecordingChapter).ms === "number" &&
+            Number.isFinite((c as RecordingChapter).ms) &&
+            typeof (c as RecordingChapter).title === "string",
+        )
+        .slice(0, MAX_CHAPTERS)
+        .sort((a, b) => a.ms - b.ms)
+    : [];
+  return { summary, chapters };
+}
+
+export function parseSummaryChaptersJson(
+  json: string | null,
+): RecordingSummaryChapters {
+  if (!json) return EMPTY_SUMMARY_CHAPTERS;
+  try {
+    return hydrateSummaryChapters(JSON.parse(json));
+  } catch {
+    return EMPTY_SUMMARY_CHAPTERS;
+  }
+}

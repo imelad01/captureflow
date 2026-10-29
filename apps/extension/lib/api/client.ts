@@ -1,0 +1,265 @@
+import { WEB_BASE } from "../config";
+import type { UserProfile } from "../auth/session";
+import type {
+  AbortRequest,
+  FinalizeRequest,
+  FinalizeResponse,
+  InitRequest,
+  InitResponse,
+  PartResponse,
+  RecordingApiError,
+  StateResponse,
+  TranscribeRequest,
+  UploadTransport,
+  UsageResponse,
+} from "./types";
+import {
+  hydrateRecordingLimits,
+  type RecordingLimits,
+} from "../capture/quality-limits";
+
+export const RECORDING_API_BASE = `${WEB_BASE}/api/r`;
+
+export const recordingViewUrl = (slug: string): string =>
+  `${WEB_BASE}/r/${slug}`;
+
+export class RecordingApiHttpError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "RecordingApiHttpError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+// Part routes authorize by device + slug ownership, so byte uploads omit the
+// bearer token (matching the desktop client).
+export function recordingHeaders(
+  deviceId: string,
+  token: string | null,
+  extra: Record<string, string> = {},
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    "x-captureflow-device": deviceId,
+    ...extra,
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return headers;
+}
+
+export async function parseResponse<T>(
+  res: Response,
+  path: string,
+): Promise<T> {
+  if (res.ok) {
+    return (await res.json()) as T;
+  }
+  let message = `HTTP ${res.status}`;
+  let code: string | undefined;
+  try {
+    const err = (await res.json()) as RecordingApiError;
+    if (err.error) message = err.error;
+    code = err.code;
+  } catch {
+    /* non-JSON body — keep the HTTP status as the message */
+  }
+  throw new RecordingApiHttpError(`${path}: ${message}`, res.status, code);
+}
+
+export async function postJson<T>(
+  path: string,
+  deviceId: string,
+  token: string | null,
+  body: unknown,
+): Promise<T> {
+  const res = await fetch(`${RECORDING_API_BASE}${path}`, {
+    method: "POST",
+    headers: recordingHeaders(deviceId, token, {
+      "content-type": "application/json",
+    }),
+    body: JSON.stringify(body),
+  });
+  return parseResponse<T>(res, path);
+}
+
+/*
+ * Copy into a fresh ArrayBuffer: a Uint8Array view is typed over
+ * ArrayBufferLike (which fetch's BodyInit rejects), and this detaches the slice
+ * from the streamer's reused buffers.
+ */
+function toBody(bytes: Uint8Array): ArrayBuffer {
+  const buf = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buf).set(bytes);
+  return buf;
+}
+
+/*
+ * No content-length: it's a forbidden fetch header (the browser sets it),
+ * unlike the desktop's Node client. `contentType` is gated by the route:
+ * octet-stream for media parts, image/jpeg for the poster, audio/webm for
+ * the transcription chunks.
+ */
+async function postBytes<T>(
+  path: string,
+  deviceId: string,
+  bytes: Uint8Array,
+  contentType: string,
+): Promise<T> {
+  const res = await fetch(`${RECORDING_API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "content-type": contentType,
+      "x-captureflow-device": deviceId,
+    },
+    body: toBody(bytes),
+  });
+  return parseResponse<T>(res, path);
+}
+
+const partPath = (route: string, slug: string, partNumber: number): string =>
+  `/${route}?slug=${encodeURIComponent(slug)}&part=${partNumber}`;
+
+export type AuthCheckResult =
+  | { kind: "ok"; userId: string; profile?: UserProfile }
+  | { kind: "invalid" }
+  | { kind: "unreachable" };
+
+const optionalString = (value: unknown): string | null =>
+  typeof value === "string" && value.length > 0 ? value : null;
+
+// The token's owner as the server last described them; a server that predates
+// the profile fields answers with the id alone.
+function hydrateProfile(
+  body: Record<string, unknown>,
+): UserProfile | undefined {
+  const email = optionalString(body.email);
+  if (!email) return undefined;
+  return {
+    name: optionalString(body.name),
+    email,
+    image: optionalString(body.image),
+  };
+}
+
+/*
+ * 401 → sign-in revoked (clear the local session); network/5xx → inconclusive,
+ * keep the session and let the next recording surface the real error. A 200
+ * without a userId is inconclusive too: the token is live, we just can't tell
+ * whose it is, which is what the browser-session comparison needs.
+ */
+export async function checkAuth(
+  deviceId: string,
+  token: string,
+): Promise<AuthCheckResult> {
+  try {
+    const res = await fetch(`${RECORDING_API_BASE}/auth/check`, {
+      headers: recordingHeaders(deviceId, token),
+    });
+    if (res.ok) {
+      const body = (await res.json().catch(() => null)) as Record<
+        string,
+        unknown
+      > | null;
+      const userId = optionalString(body?.userId);
+      return body && userId
+        ? { kind: "ok", userId, profile: hydrateProfile(body) }
+        : { kind: "unreachable" };
+    }
+    return res.status === 401 ? { kind: "invalid" } : { kind: "unreachable" };
+  } catch {
+    return { kind: "unreachable" };
+  }
+}
+
+/*
+ * The caps the next recording starts under. Null when the server cannot be
+ * asked, so the recorder starts on its own settings and the server's own
+ * checks still apply at init and finalize.
+ */
+export async function fetchRecordingLimits(
+  deviceId: string,
+  token: string,
+  timeoutMs = 5000,
+): Promise<RecordingLimits | null> {
+  try {
+    const res = await fetch(`${RECORDING_API_BASE}/usage`, {
+      headers: recordingHeaders(deviceId, token),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) return null;
+    const body = (await res
+      .json()
+      .catch(() => null)) as Partial<UsageResponse> | null;
+    return body ? hydrateRecordingLimits(body) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function createRecordingTransport(
+  deviceId: string,
+  token: string | null,
+): UploadTransport {
+  return {
+    init: (req: InitRequest) =>
+      postJson<InitResponse>("/init", deviceId, token, req),
+    uploadScreenPart: (slug, partNumber, bytes) =>
+      postBytes<PartResponse>(
+        partPath("part", slug, partNumber),
+        deviceId,
+        bytes,
+        "application/octet-stream",
+      ),
+    uploadWebcamPart: (slug, partNumber, bytes) =>
+      postBytes<PartResponse>(
+        partPath("webcam-part", slug, partNumber),
+        deviceId,
+        bytes,
+        "application/octet-stream",
+      ),
+    finalizeScreen: (req: FinalizeRequest) =>
+      postJson<FinalizeResponse>("/finalize", deviceId, token, req),
+    finalizeWebcam: async (req: FinalizeRequest) => {
+      await postJson<{ ok: true }>("/webcam-finalize", deviceId, token, req);
+    },
+    uploadPoster: async (slug: string, bytes: Uint8Array) => {
+      await postBytes<{ posterKey: string; url: string }>(
+        `/poster?slug=${encodeURIComponent(slug)}`,
+        deviceId,
+        bytes,
+        "image/jpeg",
+      );
+    },
+    uploadPosterCard: async (slug: string, bytes: Uint8Array) => {
+      await postBytes<{ posterThumbKey: string }>(
+        `/poster?slug=${encodeURIComponent(slug)}&kind=card`,
+        deviceId,
+        bytes,
+        "image/jpeg",
+      );
+    },
+    uploadAudioPart: async (slug, partNumber, bytes) => {
+      await postBytes<{ partNumber: number }>(
+        partPath("audio-part", slug, partNumber),
+        deviceId,
+        bytes,
+        "audio/webm",
+      );
+    },
+    transcribe: async (req: TranscribeRequest) => {
+      await postJson<{ ok: true }>("/transcribe", deviceId, token, req);
+    },
+    abort: async (req: AbortRequest) => {
+      await postJson<{ ok: true }>("/abort", deviceId, token, req);
+    },
+    state: async (slug: string) => {
+      const res = await fetch(
+        `${RECORDING_API_BASE}/state?slug=${encodeURIComponent(slug)}`,
+      );
+      return parseResponse<StateResponse>(res, "/state");
+    },
+    viewUrl: recordingViewUrl,
+  };
+}

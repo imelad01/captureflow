@@ -1,0 +1,48 @@
+{
+  "name": "@captureflow/admin-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3034",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "lint": "echo \"(admin) lint: TODO\"",
+    "cf:build": "opennextjs-cloudflare build",
+    "cf:deploy": "opennextjs-cloudflare build && opennextjs-cloudflare deploy",
+    "selfhost:build": "esbuild selfhost/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=selfhost/dist/server.mjs --external:./server.js --log-level=warning \"--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\""
+  },
+  "dependencies": {
+    "@captureflow/admin": "workspace:*",
+    "@captureflow/mail": "workspace:*",
+    "@captureflow/selfhost": "workspace:*",
+    "@captureflow/ui": "workspace:*",
+    "@heroui/react": "^3.2.6",
+    "@heroui/styles": "^3.2.6",
+    "@lexical/code": "^0.52.0",
+    "@lexical/link": "^0.52.0",
+    "@lexical/list": "^0.52.0",
+    "@lexical/markdown": "^0.52.0",
+    "@lexical/react": "^0.52.0",
+    "@lexical/rich-text": "^0.52.0",
+    "@lexical/selection": "^0.52.0",
+    "@lexical/utils": "^0.52.0",
+    "@opennextjs/cloudflare": "^1.19.0",
+    "lexical": "^0.52.0",
+    "lucide-react": "^1.14.0",
+    "next": "^16.2.0",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251001.0",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "tailwindcss": "^4",
+    "typescript": "catalog:",
+    "wrangler": "^4.40.0",
+    "esbuild": "^0.27.3"
+  }
+}

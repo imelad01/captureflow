@@ -1,0 +1,52 @@
+"use client";
+
+import { Video } from "lucide-react";
+import { Button } from "@heroui/react";
+import { installedExtensionId, openRecorder } from "@/lib/extension-bridge";
+import { CHROME_WEBSTORE_URL } from "@/lib/site";
+
+/*
+ * Recording happens in the extension, so this hands off to it — and when
+ * nothing answers, the extension isn't installed and the store listing is the
+ * next step rather than a dead button.
+ */
+export function RecordButton({
+  label,
+  fullWidth = false,
+}: {
+  label: string;
+  fullWidth?: boolean;
+}) {
+  const start = () => {
+    const extId = installedExtensionId();
+    if (!extId) {
+      /*
+       * Opened straight out of the press rather than after an await: a
+       * window.open that lands outside the gesture is what a popup blocker
+       * eats.
+       */
+      if (CHROME_WEBSTORE_URL) {
+        window.open(CHROME_WEBSTORE_URL, "_blank", "noopener,noreferrer");
+      }
+      return;
+    }
+    /*
+     * A stamped extension that never answers is a stale or broken worker, and
+     * dropping that on the floor left the button doing nothing at all. Same-tab
+     * navigation rather than window.open: this lands after an await, outside
+     * the gesture, where a popup would be blocked and we would be back to a
+     * dead button.
+     */
+    void openRecorder(extId).then((ok) => {
+      if (!ok && CHROME_WEBSTORE_URL)
+        window.location.href = CHROME_WEBSTORE_URL;
+    });
+  };
+
+  return (
+    <Button variant="primary" fullWidth={fullWidth} onPress={start}>
+      <Video size={16} />
+      {label}
+    </Button>
+  );
+}

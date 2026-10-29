@@ -1,0 +1,69 @@
+/// <reference types="@cloudflare/workers-types" />
+
+import {
+  ensurePersonalWorkspace,
+  getCurrentWorkspaceId,
+  getWorkspaceById,
+  listWorkspacesForUser,
+  type WorkspaceMembership,
+  type WorkspaceRole,
+  type WorkspaceRow,
+} from "@captureflow/quota";
+import { cache } from "react";
+import { getAppWebEnv } from "./cf-env";
+
+export type CurrentWorkspace = {
+  workspace: WorkspaceRow;
+  role: WorkspaceRole;
+  memberships: WorkspaceMembership[];
+};
+
+// Cached per request: the sidebar and the page both resolve it, and it is
+// three D1 round trips in sequence.
+export const resolveCurrentWorkspace = cache(
+  async function resolveCurrentWorkspace(
+    userId: string,
+    userName: string | null,
+  ): Promise<CurrentWorkspace> {
+    const env = await getAppWebEnv();
+    if (!env?.DB) {
+      throw new Error("resolveCurrentWorkspace: DB binding unavailable");
+    }
+    const memberships = await listWorkspacesForUser(env.DB, userId);
+
+    const requested = await getCurrentWorkspaceId(env.DB, userId);
+
+    const inMembership = memberships.find((m) => m.workspace_id === requested);
+    if (requested && inMembership) {
+      const row = await getWorkspaceById(env.DB, requested);
+      if (row) {
+        return { workspace: row, role: inMembership.role, memberships };
+      }
+    }
+
+    // ensurePersonalWorkspace also covers a brand-new account hitting the
+    // dashboard before the signup hook persisted a row.
+    const personal = await ensurePersonalWorkspace(env.DB, userId, userName);
+    return {
+      workspace: personal,
+      role: "owner",
+      memberships:
+        memberships.length > 0
+          ? memberships
+          : [
+              {
+                workspace_id: personal.id,
+                workspace_slug: personal.slug,
+                workspace_kind: personal.kind,
+                workspace_name: personal.name,
+                workspace_logo_key: personal.logo_key,
+                workspace_updated_at: personal.updated_at,
+                workspace_card_bg: personal.card_bg,
+                owner_user_id: personal.owner_user_id,
+                role: "owner",
+                joined_at: personal.created_at,
+              },
+            ],
+    };
+  },
+);
